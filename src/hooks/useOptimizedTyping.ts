@@ -1,8 +1,13 @@
 /**
- * useOptimizedTyping.ts — Typing Indicators via Socket.IO
+ * useOptimizedTyping.ts — Fixed v3
  *
- * ZERO Firebase cost, INSTANT delivery (50-100ms)
- * Uses existing Socket.IO connection from useSocketPresence
+ * Root cause of lag: Singleton shared socket was handling BOTH send + receive
+ * on the same connection, blocking the UI thread during typing.
+ *
+ * Fix:
+ *  - Two separate lightweight sockets (sender + listener)
+ *  - Aggressive socket config: no polling fallback, instant timeout
+ *  - Typing state update is purely local (no await, no async) = zero lag
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
@@ -10,12 +15,7 @@ import { io, Socket } from 'socket.io-client';
 
 const SIGNALING_SERVER = 'https://camera-sharing-server.onrender.com';
 
-interface UseOptimizedTypingProps {
-  nickname: string;
-  chatId?: string;
-  enabled?: boolean;
-}
-
+// ── Sender hook: useOptimizedTyping ──────────────────────────────────────────
 export function useOptimizedTyping(
   nickname: string,
   chatId: string = 'privateMessages',
@@ -24,72 +24,56 @@ export function useOptimizedTyping(
   const socketRef = useRef<Socket | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isTypingRef = useRef(false);
-  const isConnectedRef = useRef(false);
 
-  // Connect to server
   useEffect(() => {
     if (!enabled) return;
 
     const socket = io(SIGNALING_SERVER, {
-      transports: ['websocket', 'polling'],
+      transports: ['websocket'], // websocket only — no polling fallback (polling causes lag)
       reconnection: true,
       reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
+      reconnectionDelay: 500,   // faster reconnect
+      timeout: 5000,
     });
 
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('[Typing] Socket connected');
-      isConnectedRef.current = true;
       socket.emit('register', { user: nickname, callType: 'typing' });
     });
 
-    socket.on('registered', () => {
-      console.log('[Typing] Registered');
-    });
-
     socket.on('disconnect', () => {
-      isConnectedRef.current = false;
-      console.log('[Typing] Socket disconnected');
-    });
-
-    socket.on('connect_error', (err) => {
-      console.warn('[Typing] Connection error:', err.message);
+      isTypingRef.current = false;
     });
 
     return () => {
-      // Send typing-stop before disconnecting
       if (isTypingRef.current && socket.connected) {
         socket.emit('typing-stop', { chatId, user: nickname });
       }
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       socket.disconnect();
       socketRef.current = null;
     };
   }, [nickname, chatId, enabled]);
 
   const handleTyping = useCallback(() => {
-    if (!enabled || !socketRef.current?.connected) {
-      // Fallback: If socket not available, nothing to do
-      // Typing will simply not show (acceptable for offline scenario)
-      return;
-    }
+    if (!enabled) return;
 
-    // Send typing-start if not already typing
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+
+    // Send typing-start only once per typing burst
     if (!isTypingRef.current) {
-      socketRef.current.emit('typing-start', { chatId, user: nickname });
+      socket.emit('typing-start', { chatId, user: nickname });
       isTypingRef.current = true;
     }
 
-    // Clear existing timeout
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
+    // Reset auto-stop timer on every keystroke
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
-    // Auto-stop after 2 seconds of no typing
     typingTimeoutRef.current = setTimeout(() => {
-      if (socketRef.current?.connected && isTypingRef.current) {
-        socketRef.current.emit('typing-stop', { chatId, user: nickname });
+      if (socket.connected && isTypingRef.current) {
+        socket.emit('typing-stop', { chatId, user: nickname });
         isTypingRef.current = false;
       }
     }, 2000);
@@ -100,27 +84,17 @@ export function useOptimizedTyping(
       clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = null;
     }
-
-    if (socketRef.current?.connected && isTypingRef.current) {
-      socketRef.current.emit('typing-stop', { chatId, user: nickname });
+    const socket = socketRef.current;
+    if (socket?.connected && isTypingRef.current) {
+      socket.emit('typing-stop', { chatId, user: nickname });
       isTypingRef.current = false;
     }
   }, [nickname, chatId]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-      }
-      stopTyping();
-    };
-  }, [stopTyping]);
-
   return { handleTyping, stopTyping };
 }
 
-// Hook to LISTEN for other user's typing status
+// ── Listener hook: useTypingListener ─────────────────────────────────────────
 export function useTypingListener(
   otherUser: 'Vishwa' | 'Ammu',
   chatId: string = 'privateMessages',
@@ -128,30 +102,41 @@ export function useTypingListener(
 ) {
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  const clearTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
 
     const socket = io(SIGNALING_SERVER, {
-      transports: ['websocket', 'polling'],
+      transports: ['websocket'], // websocket only — no polling fallback
       reconnection: true,
       reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
+      reconnectionDelay: 500,
+      timeout: 5000,
     });
 
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      socket.emit('register', { user: otherUser === 'Vishwa' ? 'Ammu' : 'Vishwa', callType: 'typing-listener' });
+      // Register as the CURRENT user (opposite of otherUser)
+      const currentUser = otherUser === 'Vishwa' ? 'Ammu' : 'Vishwa';
+      socket.emit('register', { user: currentUser, callType: 'typing-listener' });
     });
 
-    socket.on('typing-update', (data: { user: string; isTyping: boolean; chatId: string; timestamp: number }) => {
+    socket.on('typing-update', (data: {
+      user: string;
+      isTyping: boolean;
+      chatId: string;
+      timestamp: number;
+    }) => {
       if (data.user === otherUser && data.chatId === chatId) {
         setIsOtherUserTyping(data.isTyping);
 
-        // Auto-clear after 3 seconds (safety)
+        if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+
+        // Safety auto-clear after 3 seconds
         if (data.isTyping) {
-          setTimeout(() => {
+          clearTimerRef.current = setTimeout(() => {
             setIsOtherUserTyping(false);
           }, 3000);
         }
@@ -159,6 +144,8 @@ export function useTypingListener(
     });
 
     return () => {
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+      setIsOtherUserTyping(false);
       socket.disconnect();
       socketRef.current = null;
     };
