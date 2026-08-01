@@ -40,7 +40,7 @@ import VoiceMessageInline from '../components/VoiceMessageInline';
 import CoupleMemoryPage from '../components/ui/CoupleMemoryPage';
 import { createDownscaledPreview, createPreviewUrl, detectDeviceCapabilities } from '../lib/imageCompression';
 
-// ── NEW: Camera sharing imports ────────────────────────────────────────────────
+// ── Camera sharing imports ────────────────────────────────────────────────
 import { useWebRTCCamera } from '../hooks/useWebRTCCamera';
 import CameraShareOverlay from '../components/CameraShareOverlay';
 import { useVoiceCall } from '../hooks/useVoiceCall';
@@ -48,6 +48,10 @@ import BookIconMenu from '../components/BookIconMenu';
 import LovePulse from '../components/LovePulse';
 import { useLovePulse } from '../hooks/useLovePulse';
 import { useSilentReadSignal } from '../hooks/useSilentReadSignal';
+
+// ── NEW: Screen sharing imports ────────────────────────────────────────────────
+import { useScreenShare, useScreenShareViewer } from '../hooks/ useScreenShare';
+import ScreenShareOverlay from '../components/ScreenShareOverlay';
 // ──────────────────────────────────────────────────────────────────────────────
 
 const BACKEND_URL = "https://notification2.onrender.com"; //// vishwanavyasree account 12/5/26
@@ -126,8 +130,58 @@ function Chat2({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat3, onOpenCo
     toggleSpeaker,
   } = useVoiceCall(nickname);
 
-  // Is a call screen visible? (calling, incoming, connected, ended, busy)
-  // callStatus "calling" = small 52px bar only at top, chat still visible
+  // ── NEW: Screen sharing state ────────────────────────────────────────────────
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+
+  const {
+    localStream:  shareLocalStream,
+    status:       shareStatus,
+    errorMsg:     shareErrorMsg,
+    isSpeakerOn:  shareSpeakerOn,
+    toggleSpeaker: toggleShareSpeaker,
+    stop:         stopScreenShare,
+  } = useScreenShare({ nickname, isEnabled: isScreenSharing });
+
+  // Viewer hook — always active, listens for the OTHER user sharing their screen
+  const {
+    remoteStream: viewerRemoteStream,
+    status:       viewerStatus,
+    sharerName,
+    isSpeakerOn:  viewerSpeakerOn,
+    toggleSpeaker: toggleViewerSpeaker,
+    stopViewing,
+  } = useScreenShareViewer(nickname);
+
+  const handleStartScreenShare = () => {
+    // If about to START sharing (not currently sharing) — check other user is online
+    if (!isScreenSharing) {
+      if (isOtherUserOnline === false) {
+        alert(`${nickname === 'Vishwa' ? 'Ammu' : 'Vishwa'} is offline. Wait for them to come online before screen sharing.`);
+        return;
+      }
+    }
+    setIsScreenSharing(prev => {
+      if (prev) { stopScreenShare(); return false; }
+      return true;
+    });
+  };
+
+  const handleScreenShareClose = () => {
+    if (isScreenSharing) {
+      stopScreenShare();
+      setIsScreenSharing(false);
+    } else {
+      stopViewing();
+    }
+  };
+
+  // Auto turn off isScreenSharing flag if browser's native "Stop sharing" bar was used
+  useEffect(() => {
+    if (isScreenSharing && shareStatus === 'idle') {
+      setIsScreenSharing(false);
+    }
+  }, [shareStatus, isScreenSharing]);
+  // ────────────────────────────────────────────────────────────────────────────
 
   // Book icon menu handlers
   const handleStartCamera = () => {
@@ -254,6 +308,18 @@ function Chat2({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat3, onOpenCo
     };
   }, []);
 
+//// TV device exit method 
+useEffect(() => {
+  const handleKeyDown = (e: KeyboardEvent) => {
+    // Only trigger if user is NOT typing in a text field
+    const tag = (e.target as HTMLElement).tagName;
+    if (e.key === '1' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
+      onLogout();
+    }
+  };
+  window.addEventListener('keydown', handleKeyDown);
+  return () => window.removeEventListener('keydown', handleKeyDown);
+}, [onLogout]);
   // Memory functions
   const handleOpenMemory = () => {
     setMemoryPassword("");
@@ -299,8 +365,12 @@ function Chat2({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat3, onOpenCo
       if (isCameraSharing) {
         stopCameraSharing();
       }
+      // Also stop screen sharing on unmount
+      if (isScreenSharing) {
+        stopScreenShare();
+      }
     };
-  }, [isCameraOn, setCameraOff, isCameraSharing, stopCameraSharing]);
+  }, [isCameraOn, setCameraOff, isCameraSharing, stopCameraSharing, isScreenSharing, stopScreenShare]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -328,21 +398,7 @@ function Chat2({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat3, onOpenCo
 
   // NOTE: Typing listener now uses Socket.IO (useTypingListener above)
   // Old Firestore-based listener removed for zero Firebase cost and instant delivery
-///// TV decive exit 
 
-  useEffect(() => {
-  const handleKeyDown = (e: KeyboardEvent) => {
-    // Only trigger if user is NOT typing in a text field
-    const tag = (e.target as HTMLElement).tagName;
-    if (e.key === '1' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
-      onLogout();
-    }
-  };
-  window.addEventListener('keydown', handleKeyDown);
-  return () => window.removeEventListener('keydown', handleKeyDown);
-}, [onLogout]);
-
-  
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -372,18 +428,6 @@ function Chat2({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat3, onOpenCo
 
   // ===============================================
 // 🔥 FRONTEND NOTIFICATION ENGINE — FIXED
-// ===============================================
-// Paste this inside your Chat2 component, replacing the existing
-// sendMessageNotification + processQueue + messageQueue code.
-//
-// Changes from your current version:
-//  1. messageQueue and isProcessing moved to useRef → survive re-renders
-//     (your current version resets them to [] and false on every render)
-//  2. Removed the "wait loop" for isOtherUserOnline — it can block forever
-//     if status never loads; replaced with a one-time check
-//  3. If Vishwa is online → skip notification immediately (no queue needed)
-//  4. Retry on network error with max 3 retries per message (not infinite)
-//  5. 1.2s delay between sends kept (prevents spam)
 // ===============================================
 
 const messageQueueRef = useRef<string[]>([]);
@@ -1055,7 +1099,7 @@ const processNotificationQueue = async () => {
         />
       )}
 
-      {/* ── NEW: Camera sharing overlay (WebRTC floating window) ── */}
+      {/* ── Camera sharing overlay (WebRTC floating window) ── */}
       <CameraShareOverlay
         localStream={localStream}
         remoteStream={remoteStream}
@@ -1067,6 +1111,48 @@ const processNotificationQueue = async () => {
         onToggleAudio={camToggleAudio}
         onClose={handleCameraShareClose}
       />
+
+      {/* ── NEW: Screen share overlay — shows for BOTH sharer (own preview) and viewer (received) ── */}
+      {(isScreenSharing || viewerRemoteStream) && (
+        <ScreenShareOverlay
+          remoteStream={viewerRemoteStream}
+          localStream={shareLocalStream}
+          status={isScreenSharing ? shareStatus : viewerStatus}
+          errorMsg={shareErrorMsg}
+          nickname={nickname}
+          sharerName={sharerName}
+          isSharing={isScreenSharing}
+          isSpeakerOn={isScreenSharing ? shareSpeakerOn : viewerSpeakerOn}
+          onToggleSpeaker={isScreenSharing ? toggleShareSpeaker : toggleViewerSpeaker}
+          onClose={handleScreenShareClose}
+        />
+      )}
+
+      {/* Screen share not supported on this device (mobile browsers) */}
+      {shareStatus === 'unsupported' && isScreenSharing && (
+        <div style={{
+          position: "fixed", top: 60, left: "50%", transform: "translateX(-50%)",
+          zIndex: 9999, maxWidth: "90vw", width: 340,
+          background: "#fff", borderRadius: 16, padding: "16px 20px",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.2)", border: "1px solid #fca5a5",
+          textAlign: "center",
+        }}>
+          <div style={{ fontSize: 28, marginBottom: 8 }}>🖥️🚫</div>
+          <p style={{ fontSize: 13, color: "#374151", margin: "0 0 12px", lineHeight: 1.5 }}>
+            {shareErrorMsg}
+          </p>
+          <button
+            onClick={() => setIsScreenSharing(false)}
+            style={{
+              background: "#ef4444", color: "#fff", border: "none",
+              borderRadius: 10, padding: "8px 20px", fontSize: 13, fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            OK
+          </button>
+        </div>
+      )}
 
 <style jsx>{`
   @keyframes swing {
@@ -1102,13 +1188,15 @@ const processNotificationQueue = async () => {
         <div className="max-w-4xl mx-auto">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
-              {/* ── Book icon → popup menu with Camera + Voice Call options ── */}
+              {/* ── Book icon → popup menu with Call + Camera + Screen Share options ── */}
               <LovePulse active={lovePulseActive} size={44}>
                 <BookIconMenu
                   isCameraSharing={isCameraSharing}
                   isInCall={callStatus !== "idle"}
+                  isScreenSharing={isScreenSharing}
                   onStartCamera={handleStartCamera}
                   onStartCall={handleStartCall}
+                  onStartScreenShare={handleStartScreenShare}
                 />
               </LovePulse>
 
