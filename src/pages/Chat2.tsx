@@ -50,7 +50,7 @@ import { useLovePulse } from '../hooks/useLovePulse';
 import { useSilentReadSignal } from '../hooks/useSilentReadSignal';
 
 // ── NEW: Screen sharing imports ────────────────────────────────────────────────
-import { useScreenShare, useScreenShareViewer } from '../hooks/ useScreenShare';
+import { useScreenShare, useScreenShareViewer } from '../hooks/useScreenShare';
 import ScreenShareOverlay from '../components/ScreenShareOverlay';
 // ──────────────────────────────────────────────────────────────────────────────
 
