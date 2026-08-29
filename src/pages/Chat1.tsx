@@ -29,10 +29,9 @@ interface AIMessage {
   replyTo?: { id: string; text: string; by: string } | null;
 }
 
-// ── NEW: Backend chatbot API (Groq-powered, replaces Puter.js) ────────────────
 const CHATBOT_API_URL = 'https://aichatbot2-423j.onrender.com/api/chat';
 const CHATBOT_TIMEOUT_MS = 45_000;
-const MAX_HISTORY_TURNS = 6; // matches backend's MAX_HISTORY_TURNS
+const MAX_HISTORY_TURNS = 6;
 
 function Chat1({ nickname, onLogout }: Chat1Props) {
   const [messages, setMessages] = useState<AIMessage[]>([]);
@@ -48,17 +47,30 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
   const isAwaitingAIRef = useRef(false);
   const messagesRef = useRef<AIMessage[]>([]);
 
-  // Keep messagesRef in sync so callChatbotAPI can read the latest history
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
-  // Each user gets their own collection so conversations persist across logins
-  const collectionName = `aiChat_${nickname}`;
+  // CHANGED: One shared collection for ALL users, instead of a separate
+  // collection per nickname (aiChat_a, aiChat_d, ...). Previously, whoever
+  // typed a different name on entry got an empty chat, because each name
+  // mapped to its own Firestore collection. Now every nickname reads from
+  // and writes to the SAME collection, so the conversation is common to
+  // everyone no matter what name they enter with.
+  const isNicknameReady = typeof nickname === 'string' && nickname.trim().length > 0;
+  const collectionName = 'aiChat_shared';
 
   // Subscribe to Firebase for this user's AI chat history
   useEffect(() => {
+    if (!collectionName) {
+      // Don't query, don't clear loading, wait for nickname to be ready
+      console.log('[Chat1] Waiting for nickname before loading chat history...');
+      return;
+    }
+
+    console.log('[Chat1] Subscribing to collection:', collectionName);
     setLoading(true);
+
     const q = query(
       collection(db, collectionName),
       orderBy('ts', 'asc')
@@ -71,16 +83,20 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
           id: d.id,
           ...d.data(),
         })) as AIMessage[];
+        console.log(`[Chat1] Loaded ${loaded.length} messages from ${collectionName}`);
         setMessages(loaded);
         setLoading(false);
       },
       (err) => {
-        console.error('Firebase AI chat listener error:', err);
+        console.error('[Chat1] Firebase listener error:', err);
         setLoading(false);
       }
     );
 
-    return () => unsubscribe();
+    return () => {
+      console.log('[Chat1] Unsubscribing from:', collectionName);
+      unsubscribe();
+    };
   }, [collectionName]);
 
   const spacingMap = useCallback(() => {
@@ -141,15 +157,9 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
     }
   };
 
-  // ── NEW: Call the Groq-powered backend instead of Puter.js ──────────────────
-  // Backend expects: POST { message: string, history: [{role, content}] }
-  // Backend returns: { reply: string } or { error: string }
-  // Backend already strips markdown — response is plain text, matching Chat2's
-  // message rendering exactly (no special renderedText/markdown color needed)
   const callChatbotAPI = async (userMessage: string): Promise<string> => {
-    // Build history from Firebase-persisted messages (last N turns, matches backend cap)
     const history = messagesRef.current
-      .slice(-MAX_HISTORY_TURNS * 2) // *2 because each turn = user + assistant
+      .slice(-MAX_HISTORY_TURNS * 2)
       .map(m => ({
         role: m.by === 'AI' ? 'assistant' : 'user',
         content: m.text,
@@ -172,7 +182,6 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
       try { data = await res.json(); } catch {}
 
       if (!res.ok) {
-        // Backend sends structured errors like rate limits, message-too-long, etc.
         throw new Error(data?.error || `Server error (${res.status}). Please try again.`);
       }
 
@@ -187,19 +196,24 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
       if (err.name === 'AbortError') {
         throw new Error('The AI is taking too long to respond. Please try again.');
       }
-      // Network error (backend cold-starting on Render free tier, etc.)
       if (err.message?.includes('fetch')) {
-        throw new Error('Could not reach the AI server. It may be waking up — please try again in a few seconds.');
+        throw new Error('Could not reach the AI server. It may be waking up. Please try again in a few seconds.');
       }
       throw err;
     }
   };
 
+  // FIX: Guard save function too. Never write to a null/undefined collection
   const saveMessageToFirebase = async (msg: Omit<AIMessage, 'id'>): Promise<string> => {
+    if (!collectionName) {
+      console.error('[Chat1] Cannot save. collectionName not ready yet');
+      throw new Error('Chat not ready yet. Please wait a moment and try again.');
+    }
     const docRef = await addDoc(collection(db, collectionName), {
       ...msg,
       ts: serverTimestamp(),
     });
+    console.log(`[Chat1] Saved message to ${collectionName}:`, docRef.id);
     return docRef.id;
   };
 
@@ -208,27 +222,37 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
     const userMessage = message.trim();
     if (!userMessage || isAwaitingAIRef.current) return;
 
+    if (!collectionName) {
+      setError('Chat is still loading. Please wait a moment and try again.');
+      return;
+    }
+
     setError(null);
     isAwaitingAIRef.current = true;
-
     setMessage('');
 
-    // Save user message to Firebase immediately (Firestore listener will add it to UI)
     const userMsgData = {
       text: userMessage,
       by: nickname,
       type: 'text',
       replyTo: null,
     };
-    const userId = await saveMessageToFirebase(userMsgData);
 
-    // Show typing indicator
+    let userId: string;
+    try {
+      userId = await saveMessageToFirebase(userMsgData);
+    } catch (err) {
+      console.error('[Chat1] Failed to save user message:', err);
+      setError('Failed to save your message. Please try again.');
+      isAwaitingAIRef.current = false;
+      return;
+    }
+
     setIsTyping(true);
 
     try {
       const aiText = await callChatbotAPI(userMessage);
 
-      // Save AI response to Firebase — plain text, no markdown
       await saveMessageToFirebase({
         text: aiText,
         by: 'AI',
@@ -236,16 +260,19 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
         replyTo: { id: userId, text: userMessage, by: nickname },
       });
     } catch (err: any) {
-      console.error('Chatbot API error:', err);
+      console.error('[Chat1] Chatbot API error:', err);
       const errMsg = err?.message || 'Something went wrong. Please try again.';
       setError(errMsg);
-      // Save error as AI message so it persists
-      await saveMessageToFirebase({
-        text: `Sorry, I couldn't respond right now. ${errMsg}`,
-        by: 'AI',
-        type: 'text',
-        replyTo: { id: userId, text: userMessage, by: nickname },
-      });
+      try {
+        await saveMessageToFirebase({
+          text: `Sorry, I couldn't respond right now. ${errMsg}`,
+          by: 'AI',
+          type: 'text',
+          replyTo: { id: userId, text: userMessage, by: nickname },
+        });
+      } catch {
+        // If even the error message fails to save, don't crash. Just show the inline error banner
+      }
     } finally {
       setIsTyping(false);
       isAwaitingAIRef.current = false;
@@ -263,23 +290,23 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
   };
 
   const handleDeleteMessage = async (messageId: string) => {
+    if (!collectionName) return;
     try {
       await deleteDoc(doc(db, collectionName, messageId));
     } catch (err) {
-      console.error('Failed to delete message:', err);
+      console.error('[Chat1] Failed to delete message:', err);
     }
   };
 
   const handleClearChat = async () => {
-    if (messages.length === 0) return;
+    if (!collectionName || messages.length === 0) return;
     if (!window.confirm('Clear all messages in this conversation?')) return;
 
-    // Delete each message from Firebase
     for (const msg of messages) {
       try {
         await deleteDoc(doc(db, collectionName, msg.id));
       } catch (err) {
-        console.error('Failed to delete message:', err);
+        console.error('[Chat1] Failed to delete message:', err);
       }
     }
     setError(null);
@@ -289,7 +316,7 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
 
   return (
     <div className="h-full w-full bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50">
-      {/* ── HEADER — matching Chat2 style exactly ── */}
+      {/* HEADER, matching Chat2 style exactly */}
       <div className="fixed top-0 left-0 right-0 bg-gradient-to-r from-green-50/95 via-blue-50/95 to-purple-50/95 backdrop-blur-md px-4 py-4 z-50 shadow-lg border-b border-white/30">
         <div className="max-w-4xl mx-auto">
           <div className="flex items-center justify-between">
@@ -330,7 +357,7 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
         </div>
       </div>
 
-      {/* Book Background Watermark — matching Chat2's watermark style */}
+      {/* Book Background Watermark */}
       <div className="fixed inset-0 flex items-center justify-center pointer-events-none z-0">
         <div className="text-9xl opacity-10 text-gray-500">📚</div>
       </div>
@@ -341,7 +368,7 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
         className="max-w-4xl mx-auto p-4 relative z-10 h-screen overflow-y-auto"
         style={{ paddingTop: '90px', paddingBottom: '120px' }}
       >
-        {loading ? (
+        {loading || !isNicknameReady ? (
           <div className="text-center py-12">
             <div className="text-4xl mb-4">📚</div>
             <p className="text-gray-500">Loading your conversation...</p>
@@ -380,18 +407,6 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
                   key={msg.id}
                   messageId={msg.id}
                   text={msg.text}
-                  /*
-                    NOTE: renderedText intentionally NOT passed here.
-                    The backend already strips all markdown (see cleanText()
-                    in server.js), so msg.text is always plain text.
-                    Without renderedText, RobotCloud falls through to its
-                    DEFAULT text color logic — which is the EXACT SAME color
-                    scheme Chat2 uses:
-                      - own messages  → text-[#94bde6] (blue bubble)
-                      - AI/incoming   → text-[#b5d4f2] (green bubble)
-                    This is what makes Chat1's AI text color automatically
-                    match Chat2 with zero changes needed in RobotCloud.tsx.
-                  */
                   isOwn={!isAIMessage}
                   isUser={!isAIMessage}
                   isAI={isAIMessage}
@@ -429,7 +444,7 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
         </button>
       )}
 
-      {/* Message Input — matching Chat2 style */}
+      {/* Message Input */}
       <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-sm border-t border-green-200 p-4 z-50 shadow-lg">
         <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto">
           <div className="flex gap-3 items-end">
