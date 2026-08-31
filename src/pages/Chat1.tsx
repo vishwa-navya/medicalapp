@@ -433,14 +433,14 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
         )}
       </div>
 
-      {/* Scroll to bottom button */}
+      {/* Scroll to bottom button — injection icon, matching Chat2 */}
       {showScrollButton && (
         <button
           onClick={scrollToBottom}
-          className="fixed bottom-32 right-6 bg-green-500 text-white p-3 rounded-full shadow-lg hover:bg-green-600 transition-all z-40"
+          className="fixed bottom-32 right-6 mb-4 bg-green-500 text-white p-3 rounded-full shadow-lg hover:bg-green-600 transition-all z-40"
           title="Scroll to latest message"
         >
-          <ChevronDown className="w-5 h-5" />
+          💉
         </button>
       )}
 
