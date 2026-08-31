@@ -144,26 +144,28 @@ function App() {
     // fallback: no service worker available — nothing to do
   }, []);
 
-  // 🔐 Handle Login
+  // 🔐 Handle Login — manual name entry ALWAYS goes to Chat1.
+  // The only way to reach Chat2 is by clicking a book icon.
+  // On manual login, auto-switch safety OFF (injection) so the book
+  // icons are blocked until the user manually toggles back to stethoscope.
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedNickname = inputNickname.trim().toLowerCase();
 
-    // If safety is OFF (blocked) -> go to chat1 (AI)
-    if (!isSafe) {
-      setNickname(inputNickname.trim());
-      setCurrentPage('chat1');
-      return;
+    // Auto-switch stethoscope → injection if currently safe (ON)
+    if (isSafe && !safetyLoading) {
+      toggleSafety();
     }
 
-    // Normal behaviour when safety is ON
-    if (trimmedNickname === 'vishwa' || trimmedNickname === 'ammu') {
-      setNickname(trimmedNickname === 'vishwa' ? 'Vishwa' : 'Ammu');
-      setCurrentPage('chat2');
+    // ALL manual name entries go to Chat1, including "Vishwa" / "Ammu"
+    if (trimmedNickname === 'vishwa') {
+      setNickname('Vishwa');
+    } else if (trimmedNickname === 'ammu') {
+      setNickname('Ammu');
     } else {
       setNickname(inputNickname.trim());
-      setCurrentPage('chat1');
     }
+    setCurrentPage('chat1');
   };
 
   // Quick login buttons (books)
