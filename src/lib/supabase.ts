@@ -10,9 +10,10 @@ import {
    SUPABASE CLIENT
 =================================================== */
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
+const supabaseUrl = 'https://mfbnotbpmmvisvicclji.supabase.co'
+const supabaseAnonKey =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1mYm5vdGJwbW12aXN2aWNjbGppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI0MTcwNDEsImV4cCI6MjA2Nzk5MzA0MX0.JSJs-U570W56r0qfuwXY6kfhgXMwJrbb7FwbmXF_QJA'
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 /* ===================================================
