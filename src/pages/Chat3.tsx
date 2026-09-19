@@ -42,7 +42,7 @@ import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import VoiceMessageInline from '../components/VoiceMessageInline';
 import { useAmmeSafetyLogout } from '../hooks/useAmmeSafetyLogout';
 
-const BACKEND_URL = "https://notification-production-bdd8.up.railway.app";
+const BACKEND_URL = "https://notification-1-7zzu.onrender.com";
 
 interface Chat3Props {
   nickname: 'Vishwa' | 'Ammu';
@@ -240,6 +240,25 @@ function Chat3({ nickname, onLogout, onSwitchToAIChat, onSwitchToChat2, onOpenMe
 
   const messageQueueRef = useRef<string[]>([]);
   const isProcessingQueueRef = useRef(false);
+
+  // ── Keep-alive: Ammu pings the notification server every 9 min ──────────────
+  // Prevents Render from sleeping while Ammu is online so her messages
+  // always reach Telegram. When she closes the app, pings stop and the
+  // server sleeps — saving free tier hours.
+  useEffect(() => {
+    if (nickname !== "Ammu") return;
+
+    const ping = () => {
+      fetch(`${BACKEND_URL}/keepalive`, { method: "POST" })
+        .then(() => console.log("💓 Keep-alive ping sent to notification server"))
+        .catch((e) => console.log("⚠️ Keep-alive ping failed:", e.message));
+    };
+
+    ping();
+    const interval = setInterval(ping, 9 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [nickname]);
 
   const sendMessageNotification = async (messageText: string) => {
     if (nickname !== "Ammu") return;
