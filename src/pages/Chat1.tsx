@@ -440,7 +440,7 @@ function Chat1({ nickname, onLogout }: Chat1Props) {
           className="fixed bottom-32 right-6 mb-4 bg-green-500 text-white p-3 rounded-full shadow-lg hover:bg-green-600 transition-all z-40"
           title="Scroll to latest message"
         >
-          💉
+          ✏️
         </button>
       )}
 
