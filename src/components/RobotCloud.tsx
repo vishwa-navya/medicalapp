@@ -301,7 +301,7 @@ function RobotCloud({
               onClick={handleReplyClick}
             >
               <div className="text-[10px] text-blue-600 font-medium mb-0.5">
-                Replying to {replyTo.by}
+                Replying to You
               </div>
               {msg?.replyTo?.imageUrl ? (
                 <img
